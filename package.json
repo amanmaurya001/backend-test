@@ -1,9 +1,9 @@
 {
   "name": "noddee",
   "version": "1.0.0",
-  "main": "san_rate_env.js",  // Update to your main code file
+  "main": "san_rate_env.js",  
   "scripts": {
-    "start": "node san_rate_env.js",  // Ensure this runs your main file
+    "start": "node san_rate_env.js",  
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
