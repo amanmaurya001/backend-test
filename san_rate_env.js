@@ -4,22 +4,27 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const crypto = require('crypto'); // Using Node's built-in crypto module for hashing
-const jwt = require('jsonwebtoken'); // Add this line to require jsonwebtoken
-const xss = require('xss'); // Add this for XSS protection
-const validator = require('validator'); // Add this for validation
-const rateLimit = require('express-rate-limit'); // Add this for rate limiting
-require('dotenv').config(); // Add this line to load environment variables
+const jwt = require('jsonwebtoken');
+const xss = require('xss');
+const validator = require('validator');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Secret keys - use environment variables
 const SECRET_KEY = process.env.SECRET_KEY || 'your-secret-key-for-order-verification';
-const JWT_SECRET = process.env.JWT_SECRET || 'your-jwt-secret-key'; // Add this line for JWT secret
-const JWT_EXPIRY = process.env.JWT_EXPIRY || '1m'; // Token expiry time (e.g., '1h', '7d')
+const JWT_SECRET = process.env.JWT_SECRET || 'your-jwt-secret-key';
+const JWT_EXPIRY = process.env.JWT_EXPIRY || '1h'; // Changed from 1m to 1h to match frontend expectation
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' 
+    ? process.env.ALLOWED_ORIGIN 
+    : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501'],
+  credentials: true
+}));
 app.use(bodyParser.json());
 
 // Sanitization middleware
@@ -117,7 +122,7 @@ const subscribeRateLimiter = rateLimit({
 // API general rate limiter
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 100 requests per windowMs
+  max: 100, // limit each IP to 100 requests per windowMs
   standardHeaders: true, // Return rate limit info in headers
   message: { error: 'Too many requests. Please try again later.' }
 });
@@ -125,304 +130,359 @@ const apiLimiter = rateLimit({
 // Apply general rate limiter to all API routes
 app.use('/api/', apiLimiter);
 
-// MongoDB Connections
-mongoose.connect(process.env.ESTRELLA_DB_URI || 'mongodb://localhost:27017/estrella', {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-}).then(() => console.log('Connected to MongoDB (estrella)'))
-  .catch(err => console.error('Failed to connect to MongoDB (estrella):', err));
+// Error handling middleware
+const errorHandler = (err, req, res, next) => {
+  console.error(err.stack);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Internal server error'
+  });
+};
 
-// Connect to orderbook database
-const orderbookConnection = mongoose.createConnection(process.env.ORDERBOOK_DB_URI || 'mongodb://localhost:27017/orderbook', {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-});
+// MongoDB Connection - Flexible to support both local and Atlas connections
+// Get connection strings from environment variables
+const MONGO_URI = process.env.MONGODB_URI || process.env.ESTRELLA_DB_URI || 'mongodb://localhost:27017/estrella';
+const ORDERBOOK_URI = process.env.ORDERBOOK_DB_URI || 'mongodb://localhost:27017/orderbook';
 
-orderbookConnection.once('open', () => console.log('Connected to MongoDB (orderbook)'))
-  .on('error', err => console.error('Failed to connect to MongoDB (orderbook):', err));
+// Determine if we're using MongoDB Atlas (connection string contains "mongodb+srv")
+const isUsingAtlas = MONGO_URI.includes('mongodb+srv');
+
+// MongoDB connection options
+const mongoOptions = {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+};
+
+// Add additional options for Atlas connections
+if (isUsingAtlas) {
+  mongoOptions.serverSelectionTimeoutMS = 5000; // Timeout after 5s instead of 30s
+  mongoOptions.socketTimeoutMS = 45000; // Close sockets after 45s of inactivity
+}
+
+// Connect to the primary database (estrella)
+mongoose.connect(MONGO_URI, mongoOptions)
+  .then(() => console.log(`Connected to primary MongoDB database: ${isUsingAtlas ? 'Atlas' : 'Local'}`))
+  .catch(err => console.error('Failed to connect to primary MongoDB database:', err));
+
+// Create a separate connection for orderbook if we're not using Atlas
+// If using Atlas, we'll assume all collections are in the same database
+let orderbookConnection;
+if (!isUsingAtlas) {
+  orderbookConnection = mongoose.createConnection(ORDERBOOK_URI, mongoOptions);
+  orderbookConnection.once('open', () => console.log('Connected to MongoDB (orderbook)'))
+    .on('error', err => console.error('Failed to connect to MongoDB (orderbook):', err));
+}
 
 // Email Schema & Model
 const emailSchema = new mongoose.Schema({
-    email: {
-        type: String,
-        required: true,
-        unique: true,
-        trim: true,
-        lowercase: true,
-        validate: {
-            validator: v => /^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$/.test(v),
-            message: props => `${props.value} is not a valid email address!`
-        }
-    },
-    subscriptionDate: { type: Date, default: Date.now }
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true,
+    validate: {
+      validator: v => /^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$/.test(v),
+      message: props => `${props.value} is not a valid email address!`
+    }
+  },
+  subscriptionDate: { type: Date, default: Date.now }
 });
-const Email = mongoose.model('emails', emailSchema, 'emails');
+
+// Add index to email field
+emailSchema.index({ email: 1 }, { unique: true });
+const Email = mongoose.model('emails', emailSchema);
 
 // Product Schema & Model
 const productSchema = new mongoose.Schema({
-    product_code: String,
-    product_name: String,
-    product_price: Number,
-    product_imageurl: String
+  product_code: String,
+  product_name: String,
+  product_price: Number,
+  product_imageurl: String
 }, { strict: false });
-const Product = mongoose.model('product', productSchema, 'product');
 
-// Order Schema & Model for orderbook database
+// Add index to product_code field
+productSchema.index({ product_code: 1 });
+const Product = mongoose.model('product', productSchema);
+
+// Order Schema & Model - either in separate DB or same DB based on connection type
 const orderSchema = new mongoose.Schema({
-    cart: Array,
-    address: Object,
-    pricing: Object,
-    orderDate: { type: Date, default: Date.now },
-    status: { type: String, default: 'pending' }
+  cart: Array,
+  address: Object,
+  pricing: Object,
+  orderDate: { type: Date, default: Date.now },
+  status: { type: String, default: 'pending' }
 }, { strict: false });
 
-const Order = orderbookConnection.model('Order', orderSchema, 'orders');
+// Add composite index for better query performance
+orderSchema.index({ orderDate: -1, status: 1 });
+
+// Create Order model based on connection type
+const Order = isUsingAtlas 
+  ? mongoose.model('orders', orderSchema) 
+  : orderbookConnection.model('Order', orderSchema, 'orders');
 
 // Helper function to generate order hash
 function generateOrderHash(order) {
-    // Create a string representation of the order to hash
-    // This should include all relevant order details that shouldn't be tampered with
-    const orderString = JSON.stringify({
-        cart: order.cart.map(item => ({
-            productCode: item.productCode,
-            productName: item.productName,
-            price: item.price,
-            size: item.size
-        })),
-        address: order.address,
-        pricing: order.pricing
-    });
-    
-    // Create a hash using HMAC with SHA-256
-    return crypto.createHmac('sha256', SECRET_KEY)
-                .update(orderString)
-                .digest('hex');
+  // Create a string representation of the order to hash
+  // This should include all relevant order details that shouldn't be tampered with
+  const orderString = JSON.stringify({
+    cart: order.cart.map(item => ({
+      productCode: item.productCode,
+      productName: item.productName,
+      price: item.price,
+      size: item.size
+    })),
+    address: order.address,
+    pricing: order.pricing
+  });
+  
+  // Create a hash using HMAC with SHA-256
+  return crypto.createHmac('sha256', SECRET_KEY)
+              .update(orderString)
+              .digest('hex');
 }
 
 // Helper function to verify order hash
 function verifyOrderHash(order, hash) {
-    const computedHash = generateOrderHash(order);
-    return computedHash === hash;
+  const computedHash = generateOrderHash(order);
+  return computedHash === hash;
 }
 
 // Token generation endpoint
 app.post('/api/get-token', (req, res) => {
-    const clientId = crypto.randomBytes(16).toString('hex'); // Generate random client ID
-    
-    // Create JWT token
-    const token = jwt.sign(
-        { clientId: clientId }, 
-        JWT_SECRET, 
-        { expiresIn: JWT_EXPIRY }
-    );
-    
-    res.status(200).json({ 
-        success: true, 
-        token: token 
-    });
+  const clientId = crypto.randomBytes(16).toString('hex'); // Generate random client ID
+  
+  // Create JWT token
+  const token = jwt.sign(
+    { clientId: clientId }, 
+    JWT_SECRET, 
+    { expiresIn: JWT_EXPIRY }
+  );
+  
+  res.status(200).json({ 
+    success: true, 
+    token: token 
+  });
 });
 
 // Email subscription endpoint - protected with JWT and rate limited
 app.post('/api/subscribe', subscribeRateLimiter, authenticateJWT, async (req, res) => {
-    try {
-        // Get and validate email
-        const email = req.body.email ? req.body.email.trim().toLowerCase() : '';
-        
-        if (!email) {
-            return res.status(400).json({ error: 'Email is required' });
-        }
-        
-        // Additional validation beyond schema validation
-        if (!isValidEmail(email)) {
-            return res.status(400).json({ error: 'Please enter a valid email address' });
-        }
-
-        // Check for existing email with case-insensitive search
-        const existingEmail = await Email.findOne({ email: email });
-        if (existingEmail) {
-            return res.status(409).json({ error: 'This email is already subscribed' });
-        }
-
-        // Create and save new email
-        const newEmail = new Email({ email });
-        await newEmail.save();
-
-        res.status(201).json({ message: 'Successfully subscribed to newsletter!' });
-    } catch (error) {
-        if (error.name === 'ValidationError') {
-            return res.status(400).json({ error: 'Please enter a valid email address' });
-        }
-        console.error('Error saving email:', error);
-        res.status(500).json({ error: 'Server error, please try again later' });
+  try {
+    // Get and validate email
+    const email = req.body.email ? req.body.email.trim().toLowerCase() : '';
+    
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
     }
+    
+    // Additional validation beyond schema validation
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+
+    // Check for existing email with case-insensitive search
+    const existingEmail = await Email.findOne({ email: email });
+    if (existingEmail) {
+      return res.status(409).json({ error: 'This email is already subscribed' });
+    }
+
+    // Create and save new email
+    const newEmail = new Email({ email });
+    await newEmail.save();
+
+    res.status(201).json({ message: 'Successfully subscribed to newsletter!' });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+    console.error('Error saving email:', error);
+    res.status(500).json({ error: 'Server error, please try again later' });
+  }
 });
 
 // Add to collection endpoint - protected with JWT
 app.post('/api/add-to-collection', authenticateJWT, async (req, res) => {
-    const productName = typeof req.body.productName === 'string' ? req.body.productName.trim() : '';
-    const size = typeof req.body.size === 'string' ? req.body.size.trim() : '';
+  const productName = typeof req.body.productName === 'string' ? req.body.productName.trim() : '';
+  const size = typeof req.body.size === 'string' ? req.body.size.trim() : '';
 
-    if (!productName || !size) {
-        return res.status(400).json({ success: false, message: 'Product name and size are required' });
+  if (!productName || !size) {
+    return res.status(400).json({ success: false, message: 'Product name and size are required' });
+  }
+
+  try {
+    // Sanitize the query for MongoDB
+    const query = sanitizeMongoQuery({ product_code: productName });
+    const product = await Product.findOne(query);
+
+    if (product) {
+      res.json({ success: true, product, size });
+    } else {
+      res.status(404).json({ success: false, message: 'Product not found' });
     }
-
-    try {
-        // Sanitize the query for MongoDB
-        const query = sanitizeMongoQuery({ product_code: productName });
-        const product = await Product.findOne(query);
-
-        if (product) {
-            res.json({ success: true, product, size });
-        } else {
-            res.status(404).json({ success: false, message: 'Product not found' });
-        }
-    } catch (err) {
-        console.error('Error fetching product:', err);
-        res.status(500).json({ success: false, message: 'Server error', error: err.message });
-    }
+  } catch (err) {
+    console.error('Error fetching product:', err);
+    res.status(500).json({ success: false, message: 'Server error', error: err.message });
+  }
 });
 
 // Modified checkout endpoint - protected with JWT
 app.post('/api/checkout', authenticateJWT, async (req, res) => {
-    const { cart, address } = req.body;
+  const { cart, address } = req.body;
 
-    // Input validation
-    if (!cart || !Array.isArray(cart) || cart.length === 0) {
-        return res.status(400).json({ success: false, message: 'Invalid request. Cart items are required.' });
-    }
+  // Input validation
+  if (!cart || !Array.isArray(cart) || cart.length === 0) {
+    return res.status(400).json({ success: false, message: 'Invalid request. Cart items are required.' });
+  }
+  
+  if (!address || typeof address !== 'object') {
+    return res.status(400).json({ success: false, message: 'Invalid request. Address details are required.' });
+  }
+
+  try {
+    // Extract and validate product codes
+    const productCodes = cart.map(item => {
+      if (typeof item.productCode !== 'string' || !item.productCode.trim()) {
+        throw new Error('Invalid product code in cart');
+      }
+      return item.productCode.trim();
+    });
     
-    if (!address || typeof address !== 'object') {
-        return res.status(400).json({ success: false, message: 'Invalid request. Address details are required.' });
+    // Sanitize the MongoDB query
+    const query = sanitizeMongoQuery({ product_code: { $in: productCodes } });
+    const products = await Product.find(query);
+
+    if (!products || products.length === 0) {
+      return res.status(404).json({ success: false, message: 'No products found in database' });
     }
 
-    try {
-        // Extract and validate product codes
-        const productCodes = cart.map(item => {
-            if (typeof item.productCode !== 'string' || !item.productCode.trim()) {
-                throw new Error('Invalid product code in cart');
-            }
-            return item.productCode.trim();
-        });
-        
-        // Sanitize the MongoDB query
-        const query = sanitizeMongoQuery({ product_code: { $in: productCodes } });
-        const products = await Product.find(query);
+    const enhancedCart = cart.map(cartItem => {
+      // Find the corresponding product and validate it exists
+      const productData = products.find(p => p.product_code === cartItem.productCode);
+      if (!productData) return null;
 
-        if (!products || products.length === 0) {
-            return res.status(404).json({ success: false, message: 'No products found in database' });
-        }
+      // Validate size is a string
+      const size = typeof cartItem.size === 'string' ? cartItem.size.trim() : '';
+      if (!size) return null;
 
-        const enhancedCart = cart.map(cartItem => {
-            // Find the corresponding product and validate it exists
-            const productData = products.find(p => p.product_code === cartItem.productCode);
-            if (!productData) return null;
+      return {
+        _id: productData._id,
+        productCode: productData.product_code,
+        productName: productData.product_name,
+        price: productData.product_price,
+        imageUrl: productData.product_imageurl,
+        size: size
+      };
+    }).filter(Boolean);
 
-            // Validate size is a string
-            const size = typeof cartItem.size === 'string' ? cartItem.size.trim() : '';
-            if (!size) return null;
-
-            return {
-                _id: productData._id,
-                productCode: productData.product_code,
-                productName: productData.product_name,
-                price: productData.product_price,
-                imageUrl: productData.product_imageurl,
-                size: size
-            };
-        }).filter(Boolean);
-
-        // If all items were invalid, return error
-        if (enhancedCart.length === 0) {
-            return res.status(400).json({ success: false, message: 'No valid items in cart' });
-        }
-
-        // Calculate totals with validation for numeric values
-        const subtotal = enhancedCart.reduce((sum, item) => {
-            const price = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
-            return sum + price;
-        }, 0);
-        
-        const discount = parseFloat((subtotal * 0.1).toFixed(2));
-        const delivery = subtotal > 700 ? 0 : 150;
-        const total = parseFloat((subtotal + delivery - discount).toFixed(2));
-
-        // Create the order summary with validated data
-        const orderSummary = {
-            cart: enhancedCart,
-            address,  // Already sanitized by middleware
-            pricing: { subtotal, discount, delivery, total },
-            orderDate: new Date(),
-            status: 'pending'
-        };
-
-        // Generate a hash of the order data
-        const orderHash = generateOrderHash(orderSummary);
-
-        res.status(200).json({ 
-            success: true, 
-            order: orderSummary,
-            orderHash: orderHash
-        });
-    } catch (err) {
-        console.error('Error processing checkout:', err);
-        res.status(500).json({ success: false, message: 'Server error processing order', error: err.message });
+    // If all items were invalid, return error
+    if (enhancedCart.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid items in cart' });
     }
+
+    // Calculate totals with validation for numeric values
+    const subtotal = enhancedCart.reduce((sum, item) => {
+      const price = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+      return sum + price;
+    }, 0);
+    
+    const discount = parseFloat((subtotal * 0.1).toFixed(2));
+    const delivery = subtotal > 700 ? 0 : 150;
+    const total = parseFloat((subtotal + delivery - discount).toFixed(2));
+
+    // Create the order summary with validated data
+    const orderSummary = {
+      cart: enhancedCart,
+      address,  // Already sanitized by middleware
+      pricing: { subtotal, discount, delivery, total },
+      orderDate: new Date(),
+      status: 'pending'
+    };
+
+    // Generate a hash of the order data
+    const orderHash = generateOrderHash(orderSummary);
+
+    res.status(200).json({ 
+      success: true, 
+      order: orderSummary,
+      orderHash: orderHash
+    });
+  } catch (err) {
+    console.error('Error processing checkout:', err);
+    res.status(500).json({ success: false, message: 'Server error processing order', error: err.message });
+  }
 });
 
 // Modified save-order endpoint - protected with JWT
 app.post('/api/save-order', authenticateJWT, async (req, res) => {
-    try {
-        const { order, orderHash } = req.body;
-        
-        if (!order || !orderHash || typeof orderHash !== 'string') {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid order data or missing hash' 
-            });
-        }
-        
-        // Validate order has required properties
-        if (!order.cart || !Array.isArray(order.cart) || !order.address || !order.pricing) {
-            return res.status(400).json({
-                success: false,
-                message: 'Order is missing required fields'
-            });
-        }
-        
-        // Verify the hash to ensure data integrity
-        if (!verifyOrderHash(order, orderHash)) {
-            console.error('Hash verification failed');
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Order verification failed. The order data may have been tampered with.' 
-            });
-        }
-        
-        // If hash verification passes, save the order
-        const newOrder = new Order(order);
-        await newOrder.save();
-        
-        res.status(200).json({ 
-            success: true, 
-            message: 'Order saved successfully', 
-            orderId: newOrder._id 
-        });
-    } catch (err) {
-        console.error('Error saving order:', err);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server error saving order', 
-            error: err.message 
-        });
+  try {
+    const { order, orderHash } = req.body;
+    
+    if (!order || !orderHash || typeof orderHash !== 'string') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid order data or missing hash' 
+      });
     }
+    
+    // Validate order has required properties
+    if (!order.cart || !Array.isArray(order.cart) || !order.address || !order.pricing) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order is missing required fields'
+      });
+    }
+    
+    // Verify the hash to ensure data integrity
+    if (!verifyOrderHash(order, orderHash)) {
+      console.error('Hash verification failed');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Order verification failed. The order data may have been tampered with.' 
+      });
+    }
+    
+    // If hash verification passes, save the order
+    const newOrder = new Order(order);
+    await newOrder.save();
+    
+    res.status(200).json({ 
+      success: true, 
+      message: 'Order saved successfully', 
+      orderId: newOrder._id 
+    });
+  } catch (err) {
+    console.error('Error saving order:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error saving order', 
+      error: err.message 
+    });
+  }
 });
 
 // Health check endpoint - we'll leave this public
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok' });
+  const primaryDbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+  let orderbookDbStatus = 'N/A';
+  
+  // Check orderbook connection status if using separate connections
+  if (!MONGO_URI.includes('mongodb+srv') && orderbookConnection) {
+    orderbookDbStatus = orderbookConnection.readyState === 1 ? 'connected' : 'disconnected';
+  }
+  
+  res.json({ 
+    status: 'ok', 
+    primaryDb: primaryDbStatus,
+    orderbookDb: orderbookDbStatus,
+    usingAtlas: MONGO_URI.includes('mongodb+srv')
+  });
 });
+
+// Apply error handling middleware
+app.use(errorHandler);
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
