@@ -11,6 +11,10 @@ const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
+
+// Trust proxy - essential for Render.com and other hosting services that use proxies
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 3000;
 
 // Secret keys - use environment variables
