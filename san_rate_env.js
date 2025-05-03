@@ -18,9 +18,9 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // Secret keys - use environment variables
-const SECRET_KEY = process.env.SECRET_KEY || 'your-secret-key-for-order-verification';
-const JWT_SECRET = process.env.JWT_SECRET || 'your-jwt-secret-key';
-const JWT_EXPIRY = process.env.JWT_EXPIRY || '1h'; // Changed from 1m to 1h to match frontend expectation
+const SECRET_KEY = process.env.SECRET_KEY ;
+const JWT_SECRET = process.env.JWT_SECRET ;
+const JWT_EXPIRY = process.env.JWT_EXPIRY ; // Changed from 1m to 1h to match frontend expectation
 
 // Middleware
 app.use(cors({
