@@ -1,4 +1,3 @@
-
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -18,9 +17,9 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // Secret keys - use environment variables
-const SECRET_KEY = process.env.SECRET_KEY ;
-const JWT_SECRET = process.env.JWT_SECRET ;
-const JWT_EXPIRY = process.env.JWT_EXPIRY ; // Changed from 1m to 1h to match frontend expectation
+const SECRET_KEY = process.env.SECRET_KEY;
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRY = process.env.JWT_EXPIRY; // Changed from 1m to 1h to match frontend expectation
 
 // Middleware
 app.use(cors({
@@ -143,10 +142,8 @@ const errorHandler = (err, req, res, next) => {
   });
 };
 
-// MongoDB Connection - Flexible to support both local and Atlas connections
-// Get connection strings from environment variables
-const MONGO_URI = process.env.MONGODB_URI || process.env.ESTRELLA_DB_URI || 'mongodb://localhost:27017/estrella';
-const ORDERBOOK_URI = process.env.ORDERBOOK_DB_URI || 'mongodb://localhost:27017/orderbook';
+// MongoDB Connection - Using a single MongoDB URI for everything
+const MONGO_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/estrella';
 
 // Determine if we're using MongoDB Atlas (connection string contains "mongodb+srv")
 const isUsingAtlas = MONGO_URI.includes('mongodb+srv');
@@ -163,19 +160,10 @@ if (isUsingAtlas) {
   mongoOptions.socketTimeoutMS = 45000; // Close sockets after 45s of inactivity
 }
 
-// Connect to the primary database (estrella)
+// Connect to MongoDB
 mongoose.connect(MONGO_URI, mongoOptions)
-  .then(() => console.log(`Connected to primary MongoDB database: ${isUsingAtlas ? 'Atlas' : 'Local'}`))
-  .catch(err => console.error('Failed to connect to primary MongoDB database:', err));
-
-// Create a separate connection for orderbook if we're not using Atlas
-// If using Atlas, we'll assume all collections are in the same database
-let orderbookConnection;
-if (!isUsingAtlas) {
-  orderbookConnection = mongoose.createConnection(ORDERBOOK_URI, mongoOptions);
-  orderbookConnection.once('open', () => console.log('Connected to MongoDB (orderbook)'))
-    .on('error', err => console.error('Failed to connect to MongoDB (orderbook):', err));
-}
+  .then(() => console.log(`Connected to MongoDB database: ${isUsingAtlas ? 'Atlas' : 'Local'}`))
+  .catch(err => console.error('Failed to connect to MongoDB database:', err));
 
 // Email Schema & Model
 const emailSchema = new mongoose.Schema({
@@ -209,7 +197,7 @@ const productSchema = new mongoose.Schema({
 productSchema.index({ product_code: 1 });
 const Product = mongoose.model('product', productSchema);
 
-// Order Schema & Model - either in separate DB or same DB based on connection type
+// Order Schema & Model - now using the same connection as everything else
 const orderSchema = new mongoose.Schema({
   cart: Array,
   address: Object,
@@ -221,10 +209,8 @@ const orderSchema = new mongoose.Schema({
 // Add composite index for better query performance
 orderSchema.index({ orderDate: -1, status: 1 });
 
-// Create Order model based on connection type
-const Order = isUsingAtlas 
-  ? mongoose.model('orders', orderSchema) 
-  : orderbookConnection.model('Order', orderSchema, 'orders');
+// Create Order model using the same connection
+const Order = mongoose.model('orders', orderSchema);
 
 // Helper function to generate order hash
 function generateOrderHash(order) {
@@ -467,19 +453,12 @@ app.post('/api/save-order', authenticateJWT, async (req, res) => {
 
 // Health check endpoint - we'll leave this public
 app.get('/api/health', (req, res) => {
-  const primaryDbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-  let orderbookDbStatus = 'N/A';
-  
-  // Check orderbook connection status if using separate connections
-  if (!MONGO_URI.includes('mongodb+srv') && orderbookConnection) {
-    orderbookDbStatus = orderbookConnection.readyState === 1 ? 'connected' : 'disconnected';
-  }
+  const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
   
   res.json({ 
     status: 'ok', 
-    primaryDb: primaryDbStatus,
-    orderbookDb: orderbookDbStatus,
-    usingAtlas: MONGO_URI.includes('mongodb+srv')
+    database: dbStatus,
+    usingAtlas: isUsingAtlas
   });
 });
 
