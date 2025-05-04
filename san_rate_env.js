@@ -22,7 +22,7 @@ const JWT_EXPIRY = process.env.JWT_EXPIRY ; // Changed from 1m to 1h to match fr
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
     ? process.env.ALLOWED_ORIGIN 
-    : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501'],
+    : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501','https://amanshu0143.github.io'],
   credentials: true
 }));
 app.use(bodyParser.json());
