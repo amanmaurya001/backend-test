@@ -1,4 +1,4 @@
-
+// BACKEND CODE - server.js
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -11,10 +11,6 @@ const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
-
-// Trust proxy - essential for Render.com and other hosting services that use proxies
-app.set('trust proxy', 1);
-
 const PORT = process.env.PORT || 3000;
 
 // Secret keys - use environment variables
@@ -26,7 +22,7 @@ const JWT_EXPIRY = process.env.JWT_EXPIRY ; // Changed from 1m to 1h to match fr
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
     ? process.env.ALLOWED_ORIGIN 
-    : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501','https://amanshu0143.github.io'],
+    : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501'],
   credentials: true
 }));
 app.use(bodyParser.json());
