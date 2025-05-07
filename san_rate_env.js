@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const xss = require('xss');
 const validator = require('validator');
 const rateLimit = require('express-rate-limit');
+const helmet = require('helmet'); // Added for security headers
 require('dotenv').config();
 
 const app = express();
@@ -21,14 +22,53 @@ const SECRET_KEY = process.env.SECRET_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRY = process.env.JWT_EXPIRY; // Changed from 1m to 1h to match frontend expectation
 
+// Security Middleware - Apply Helmet for security headers
+app.use(helmet()); // This adds multiple security headers
+
+// Additional custom security headers
+app.use((req, res, next) => {
+  // Force HTTPS - redirect HTTP to HTTPS
+  if (process.env.NODE_ENV === 'production' && !req.secure && req.get('x-forwarded-proto') !== 'https') {
+    return res.redirect('https://' + req.get('host') + req.url);
+  }
+  
+  // Strict-Transport-Security header with long max-age
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  
+  // Content-Security-Policy - restricts sources of content
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'");
+  
+  // X-Content-Type-Options - prevents MIME type sniffing
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  
+  // X-Frame-Options - prevents clickjacking
+  res.setHeader('X-Frame-Options', 'DENY');
+  
+  // X-XSS-Protection - provides XSS protection in older browsers
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  
+  // Referrer-Policy - controls amount of referrer info sent
+  res.setHeader('Referrer-Policy', 'same-origin');
+  
+  // Feature-Policy - controls browser features
+  res.setHeader('Feature-Policy', "camera 'none'; microphone 'none'; geolocation 'none'");
+  
+  // Permissions-Policy - newer version of Feature-Policy
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  
+  next();
+});
+
 // Middleware
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
     ? process.env.ALLOWED_ORIGIN 
     : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501','https://amanshu0143.github.io'],
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '100kb' })); // Limit request size
 
 // Sanitization middleware
 const sanitizeRequest = (req, res, next) => {
