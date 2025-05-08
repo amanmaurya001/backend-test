@@ -63,7 +63,7 @@ app.use((req, res, next) => {
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
     ? process.env.ALLOWED_ORIGIN 
-    : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501','https://amanshu0143.github.io'],
+    : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501','https://amanmaurya001.github.io'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
