@@ -66,7 +66,15 @@ app.use(cors({
     : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:5500','http://127.0.0.1:5501','https://amanmaurya001.github.io','http://localhost:3000'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+allowedHeaders: [
+    'Content-Type', 
+    'Authorization',
+    'X-CSRF-Token',              // Add this line
+    'X-Requested-With',
+    'Accept',
+    'Origin'
+  ],
+  optionsSuccessStatus: 200
 }));
 app.use(bodyParser.json({ limit: '100kb' })); // Limit request size
 
